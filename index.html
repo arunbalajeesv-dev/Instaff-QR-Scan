@@ -205,6 +205,13 @@ button{font-family:inherit;cursor:pointer}
 .inclist span:nth-last-child(-n+2){border-bottom:0}
 .grouplabel{font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin:4px 0 -2px}
 
+.ticklist{list-style:none;margin:0;padding:12px 14px;background:var(--white);border:1px solid var(--card-border);
+  border-radius:15px;display:flex;flex-direction:column;gap:8px}
+.ticklist li{display:flex;gap:9px;align-items:flex-start;font-size:12.8px;line-height:1.4;font-weight:600}
+.ticklist svg{flex:0 0 auto;color:var(--primary);margin-top:1px;width:14px;height:14px}
+.pickrow{flex-direction:column;align-items:stretch;gap:10px}
+.sepline{height:1px;background:var(--card-border);margin:2px 0}
+
 /* ---- results ---- */
 .bigblock{background:var(--tint);border:1px solid var(--tint-border);border-radius:18px;padding:16px;
   display:flex;flex-direction:column;gap:4px}
@@ -317,13 +324,15 @@ const I = {
    ============================================================ */
 const LIMIT = 480;                 // 8 hours of work, every workload service
 const BAND = w => w <= 240 ? 1 : 2; // 0-240 = 1 professional, 241-480 = 2
-const round15 = m => Math.ceil(m / 15) * 15;
+const ROUND_TO = 5;                 // time on site rounds up to 5 min, set 21 Oct (was 15, then 10)
+const roundUp = m => Math.ceil(m / ROUND_TO) * ROUND_TO;
 
 function staffing(workload){
+  workload = Math.round(workload * 1e6) / 1e6;   // clears float dust such as 120.00000000000003
   if (workload > LIMIT) return {care:true, reason:'More than 8 hours of work'};
   const pros = BAND(workload);
   const each = workload / pros;
-  return {care:false, workload, pros, each, onsite:round15(each)};
+  return {care:false, workload, pros, each, onsite:roundUp(each)};
 }
 function hhmm(m){
   const h = Math.floor(m/60), mm = Math.round(m%60);
@@ -333,7 +342,7 @@ function hhmm(m){
 }
 const r2 = n => Math.round(n*100)/100;
 const esc = s => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-const plural = (n,w) => n + ' ' + w + (n === 1 ? '' : 's');
+const plural = (n,w) => n + ' ' + (n === 1 ? w : (w === 'person' ? 'people' : w + 's'));
 
 /* ============================================================
    INPUT HELPERS — every service builds its steps from these
@@ -358,12 +367,12 @@ const UI = {
       `<button class="chip" data-v="${it.id}" aria-pressed="${sel===it.id}">${it.label}${it.sub?`<span class="sub">${it.sub}</span>`:''}</button>`
     ).join('') + `</div>`;
   },
-  stepRow(key, name, sub, val, min, max, on){
+  stepRow(key, name, sub, val, min, max, on, disp){
     return `<div class="row ${on?'on':''}">
       <span class="rname">${name}${sub?`<span class="rsub">${sub}</span>`:''}</span>
       <span class="stepper" data-input="step" data-key="${key}" data-min="${min}" data-max="${max}">
         <button data-d="-1" ${val<=min?'disabled':''} aria-label="Less">–</button>
-        <span class="val">${val}</span>
+        <span class="val">${disp != null ? disp : val}</span>
         <button data-d="1" ${val>=max?'disabled':''} aria-label="More">+</button>
       </span></div>`;
   },
@@ -393,6 +402,26 @@ const UI = {
   sec(title, body){ return `<div class="q"><div class="sectitle">${title}</div>${body}</div>`; }
 };
 
+/* ---------- Included / Not included, placed inside a step or on review (21 Oct) ---------- */
+function contentHTML(s, st, where){
+  const c = s.content;
+  const inc = (where === 'review' && s.reviewIncluded) ? s.reviewIncluded(st) : c.included;
+  let h = '';
+  if (where === 'step' && s.banner) h += `<div class="warnnote"><strong>${s.banner.title}</strong><br>${s.banner.text}</div>`;
+  h += UI.sec("What's included", inc && inc.length
+    ? `<ul class="ticklist">${inc.map(t => `<li>${I.tick}<span>${t}</span></li>`).join('')}</ul>`
+      + (c.includedNote ? `<div class="note" style="margin-top:9px">${c.includedNote}</div>` : '')
+    : `<div class="emptynote">To be confirmed</div>`);
+  if (c.notIncluded === null)
+    h += UI.sec('Not included', `<div class="emptynote">To be confirmed</div>`);
+  else if (c.notIncluded && c.notIncluded.length)
+    h += UI.sec('Not included', `<div class="plainlist muted"><ul>${c.notIncluded.map(t => `<li>${t}</li>`).join('')}</ul></div>`);
+  if (c.ready && c.ready.length)
+    h += UI.sec('Please have ready' + (c.readyDraft ? '<span class="draftbadge">draft</span>' : ''),
+      `<div class="plainlist"><ul>${c.ready.map(t => `<li>${t}</li>`).join('')}</ul></div>`);
+  return h;
+}
+
 /* ============================================================
    SERVICE DEFINITIONS
    Every number below comes from an approved Service Logic sheet.
@@ -401,34 +430,34 @@ const UI = {
 
 /* ---------- shared block-booking engine (Server, POS, Busser) ---------- */
 const BLOCK_DUR = [{id:'dur_2',hours:2},{id:'dur_4',hours:4}];
-const BLOCK_MAX_EXTRA = 4;   // base + 4, set 19 Oct
+const BLOCK_MAX_TOTAL = 4;   // hours per person, capped at 4 "for now", set 21 Oct
 const BLOCK_MAX_PEOPLE = 4;  // above this, customer care, set 19 Oct
 
+function blockMaxExtra(st){ return BLOCK_MAX_TOTAL - BLOCK_DUR.find(x => x.id === st.dur).hours; }
 function blockCalc(st){
   const d = BLOCK_DUR.find(x => x.id === st.dur);
+  st.extra = Math.max(0, Math.min(st.extra, BLOCK_MAX_TOTAL - d.hours)); // switching to 4 hours drops any extra hours
   const per = d.hours + st.extra;
   return {care:false, blocks:true, base:d.hours, extra:st.extra, per,
           people:st.people, totalHours:per*st.people, workload:per*st.people*60};
 }
-function blockSteps(S, labels){
-  return [
-    {title:'How long', build:st => ''
-      + UI.q('How long do you need cover?',
-             'Everyone in this booking works the same hours. For different hours, make a second booking.',
-             UI.seg('dur', BLOCK_DUR.map(d => ({v:d.id, n:d.hours+' hours', s:labels.sub[d.id]})), st.dur))
-      + UI.q('Need longer?', `Add up to ${BLOCK_MAX_EXTRA} more hours, one at a time.`,
-             UI.stepRow('extra','Extra hours',
-               st.extra >= BLOCK_MAX_EXTRA ? 'maximum reached' : (BLOCK_MAX_EXTRA-st.extra)+' more available',
-               st.extra, 0, BLOCK_MAX_EXTRA, st.extra>0))
-      + big(hhmm((BLOCK_DUR.find(x=>x.id===st.dur).hours+st.extra)*60), 'per person, everyone starting together')
-    },
-    {title:'How many', build:(st,r) => ''
-      + UI.q(labels.countQ, `Each one works ${hhmm(r.per*60)}.`, UI.people('people', st.people, BLOCK_MAX_PEOPLE))
-      + big(r.totalHours + ' worker-hours', `${plural(r.people,labels.unit)} × ${hhmm(r.per*60)}`)
-      + (labels.extraInput ? labels.extraInput(st) : '')
-      + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, labels.notePh))
-    }
-  ];
+// Since 21 Oct: how many comes first, how long second. `contentOn` picks the screen that carries Included / Not included.
+function blockSteps(labels){
+  const howMany = {title:'How many', content:labels.contentOn === 'count', build:(st,r) => ''
+    + UI.q(labels.countQ, 'You choose the hours on the next step.', UI.people('people', st.people, BLOCK_MAX_PEOPLE))
+    + big(plural(r.people, labels.unit), `each working ${hhmm(r.per*60)} unless you change it next`)};
+  const howLong = {title:'How long', content:labels.contentOn === 'duration', build:(st,r) => {
+    const max = blockMaxExtra(st);
+    return UI.q('How long do you need cover?',
+        `Everyone in this booking works the same hours, up to ${BLOCK_MAX_TOTAL} hours. For different hours, make a second booking.`,
+        UI.seg('dur', BLOCK_DUR.map(d => ({v:d.id, n:d.hours+' hours', s:labels.sub[d.id]})), st.dur))
+      + (max > 0 ? UI.q('Need longer?', `Add up to ${plural(max,'more hour')}.`,
+          `<div class="rows">` + UI.stepRow('extra','Extra hours',
+            st.extra >= max ? 'maximum reached' : (max-st.extra)+' more available', st.extra, 0, max, st.extra>0) + `</div>`) : '')
+      + big(hhmm(r.per*60) + ' each', `${plural(r.people,labels.unit)}, everyone starting together · ${r.totalHours} worker-hours`)
+      + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, labels.notePh));
+  }};
+  return [howMany, howLong];
 }
 function big(v,l){ return `<div class="bigblock"><span class="bigv">${v}</span><span class="bigl">${l}</span></div>`; }
 
@@ -441,14 +470,15 @@ const TOILET_FACILITY = [
   {id:'fac_xl',     name:'Very large',    sqft:'2,000 to 4,000 sqft', help:'Large office or facility',       base:30},
   {id:'fac_complex',name:'Complex',       sqft:'Above 4,000 sqft',    help:'Mall, cinema or office complex', base:40}
 ];
+// Fixture minutes moved to the nearest 5, set 21 Oct (sheet had urinal 7, basin 6, mirror 3, countertop 3, cubicle 4).
 const TOILET_FIX = [
   {id:'wc_qty', name:'WC / toilets', min:10, max:100},
-  {id:'urinal_qty', name:'Urinals', min:7, max:100},
-  {id:'wash_basin_qty', name:'Wash basins', min:6, max:100},
-  {id:'mirror_qty', name:'Mirrors', min:3, max:100},
-  {id:'countertop_qty', name:'Countertops', min:3, max:50}
+  {id:'urinal_qty', name:'Urinals', min:5, max:100},
+  {id:'wash_basin_qty', name:'Wash basins', min:5, max:100},
+  {id:'mirror_qty', name:'Mirrors', min:5, max:100},
+  {id:'countertop_qty', name:'Countertops', min:5, max:50}
 ];
-const CUBICLE_MIN = 4;
+const CUBICLE_MIN = 5;
 
 /* ---------- 2. Opening & Closing Cleaning ---------- */
 const OC_PACKAGES = [
@@ -458,25 +488,28 @@ const OC_PACKAGES = [
   {id:'pkg_xl',     name:'Extra Large',  seats:'76 to 100 seats', base:150},
   {id:'pkg_over',   name:'More than 100',seats:'needs a call',    care:true}
 ];
+// Revised 21 Oct: AC filters and furniture moving removed; carpet and outdoor picked from set sizes.
 const OC_ADDONS = [
   {id:'fan_qty', name:'Fan cleaning', unit:'fan', mins:10, kind:'count', desc:'Blades, housing and the mount, wiped down and degreased.'},
   {id:'sofa_qty', name:'Sofa cleaning', unit:'sofa', mins:5, kind:'count', desc:'Surface clean of seating upholstery, including under the cushions.'},
-  {id:'carpet_sqft', name:'Carpet cleaning', unit:'sqft', mins:15, block:100, kind:'area', desc:'Vacuum and spot clean. Blocks of 100 sqft, rounded up.'},
-  {id:'outdoor_sqft', name:'Outdoor cleaning', unit:'sqft', mins:15, block:250, kind:'area', desc:'Entrance, patio and seating outside. Blocks of 250 sqft, rounded up.'},
-  {id:'ac_filter_qty', name:'AC filters', unit:'indoor unit', mins:15, kind:'count', desc:'Indoor unit filters removed, washed and refitted.'},
-  {id:'glass_section_qty', name:'High glass', unit:'section', mins:20, kind:'count', desc:'Facade and high glass, with a ladder where needed.'},
-  {id:'furniture_zone_qty', name:'Furniture moving', unit:'zone', mins:15, kind:'count', desc:'Furniture moved aside, deep dusting behind and underneath, then put back.'},
+  {id:'carpet_sqft', name:'Carpet cleaning', unit:'sqft', mins:15, block:100, kind:'area', choices:[100,200,300,400,500],
+   desc:'Vacuum and spot clean. 15 min per 100 sqft.'},
+  {id:'outdoor_sqft', name:'Outdoor cleaning', unit:'sqft', mins:15, block:250, kind:'area', choices:[250,500,750,1000,1250,1500],
+   desc:'Entrance, patio and seating outside. 15 min per 250 sqft.'},
+  {id:'glass_section_qty', name:'High glass', unit:'section', mins:20, kind:'count', desc:'Glass up to 6 ft, counted by section.'},
   {id:'stain_zone_qty', name:'Stain removal', unit:'spot', mins:10, kind:'count', desc:'Targeted treatment of a marked spot or zone.'}
 ];
 
 /* ---------- 3. KST / Dishwashing ---------- */
+// Package names are the counts themselves, set 21 Oct.
 const DW_PACKAGES = [
-  {id:'pkg_small',    name:'Small',    pcs:'Up to 150 pcs',    base:60},
-  {id:'pkg_moderate', name:'Moderate', pcs:'151 to 350 pcs',   base:90},
-  {id:'pkg_high',     name:'High',     pcs:'351 to 700 pcs',   base:150},
-  {id:'pkg_bulk',     name:'Bulk',     pcs:'701 to 1,200 pcs', base:240},
-  {id:'pkg_over',     name:'More than 1,200', pcs:'needs a call', care:true}
+  {id:'pkg_small',    name:'Up to 150 pcs',       base:60},
+  {id:'pkg_moderate', name:'151 to 350 pcs',      base:90},
+  {id:'pkg_high',     name:'351 to 700 pcs',      base:150},
+  {id:'pkg_bulk',     name:'701 to 1,200 pcs',    base:240},
+  {id:'pkg_over',     name:'More than 1,200 pcs', sub:'needs a call', care:true}
 ];
+// Specialised kitchenware removed and bulk sanitisation made a quantity, 21 Oct.
 const DW_ADDONS = [
   {id:'large_vessel_qty', name:'Extra-large vessels', unit:'vessel', mins:5, kind:'count', desc:'30 litres and above. Anything under 30 L is already in your package.'},
   {id:'oven_accessory_qty', name:'Oven accessories', unit:'item', mins:5, kind:'count', desc:'Grills, trays and baskets from the oven.'},
@@ -486,8 +519,9 @@ const DW_ADDONS = [
   {id:'trolley_qty', name:'Trolleys', unit:'trolley', mins:10, kind:'count', desc:'Service and kitchen trolleys, including shelves and wheels.'},
   {id:'rack_qty', name:'Racks', unit:'rack', mins:10, kind:'count', desc:'Storage and drying racks.'},
   {id:'dishwasher_machine_qty', name:'Dishwasher machine', unit:'machine', mins:20, kind:'count', desc:'The machine itself — filters, interior and door seals.'},
-  {id:'bulk_sanitisation_qty', name:'Bulk sanitisation', unit:'pcs', mins:15, block:100, kind:'area', desc:'A sanitising pass after washing, per 100 pieces, on top of your package.'},
-  {id:'special_kitchenware_qty', name:'Specialised kitchenware', unit:'item', mins:5, kind:'count', desc:'Items needing a particular method but not special handling.'}
+  {id:'bulk_sanitisation_qty', name:'Bulk sanitisation', unit:'batch', mins:15, kind:'count',
+   fmt:v => `${(v*100).toLocaleString()} pcs`,
+   desc:'A sanitising pass after washing, on top of your package. Each step is 100 pieces.'}
 ];
 
 /* ---------- 4. Garbage & Waste Handling ---------- */
@@ -504,12 +538,20 @@ const G_WET = [
   {id:'wet_custom', label:'More',   sub:'over 60 L',  base:60, mix:15, custom:true}
 ];
 const DRY_BLOCK = 60, DRY_BLOCK_MIX = 10, WET_BLOCK = 30, WET_BLOCK_MIX = 15;
-const G_DIST = [
-  {id:'distance_none',  label:'None',       mins:0},
-  {id:'distance_0_25',  label:'Up to 25 m', mins:10},
-  {id:'distance_26_50', label:'26 to 50 m', mins:20},
-  {id:'distance_51_75', label:'51 to 75 m', mins:30}
-];
+const GARB_FT_INCLUDED = 50;  // ft, set 21 Oct
+const GARB_FT_STEP_MIN = 3;   // min per extra 25 ft, set 21 Oct
+
+/* ---------- shared: floors travelled and carrying distance (Garbage, Loading & Unloading) ---------- */
+// Stairs extended to 6 floors on 21 Oct, keeping +0.25 per floor. Lift factors unchanged.
+const STAIRS = {1:1.25, 2:1.5, 3:1.75, 4:2.0, 5:2.25, 6:2.5};
+const STAIRS_MAX = 6;
+const FT_STEP = 25;
+function accessFactor(sameFloor, lift, n){
+  if (sameFloor) return {f:1.0, mode:'same'};
+  if (lift) return {f: n <= 3 ? 1.1 : (n <= 6 ? 1.2 : 1.3), mode:'lift'};
+  if (n > STAIRS_MAX) return {stop:true, mode:'stairs'};
+  return {f:STAIRS[n], mode:'stairs'};
+}
 
 /* ---------- 5. Stock Counting ---------- */
 const SC_BASE = {
@@ -562,23 +604,24 @@ const PK_PACKAGING = [
   {id:'pouch', label:'Pouch'},{id:'box', label:'Box'}
 ];
 
-/* ---------- 7. Kitchen Equipment Cleaning (workbook v2, 13 Oct) ---------- */
+/* ---------- 7. Kitchen Equipment Cleaning (workbook v2, 13 Oct; revised 21 Oct) ---------- */
 const KE_SIZES = [
-  {id:'small',  name:'Small',  sqft:'Up to 300 sqft',   base:60,  floor:20, tile:25, inc:{counter:2, shelf:2, storage:2, sink:1, hob:1, burner:1}},
-  {id:'medium', name:'Medium', sqft:'Up to 600 sqft',   base:90,  floor:30, tile:30, inc:{counter:4, shelf:4, storage:4, sink:2, hob:1, burner:1}},
-  {id:'large',  name:'Large',  sqft:'Up to 1,000 sqft', base:105, floor:45, tile:40, inc:{counter:6, shelf:6, storage:6, sink:2, hob:1, burner:1}},
-  {id:'xl',     name:'XL',     sqft:'Up to 1,500 sqft', base:150, floor:60, tile:50, inc:{counter:8, shelf:8, storage:8, sink:3, hob:1, burner:1}},
+  {id:'small',  name:'Small',  sqft:'Up to 300 sqft',   base:60,  tile:25, inc:{counter:2, shelf:2, storage:2, sink:1, hob:1, burner:1}},
+  {id:'medium', name:'Medium', sqft:'Up to 600 sqft',   base:90,  tile:30, inc:{counter:4, shelf:4, storage:4, sink:2, hob:1, burner:1}},
+  {id:'large',  name:'Large',  sqft:'Up to 1,000 sqft', base:105, tile:40, inc:{counter:6, shelf:6, storage:6, sink:2, hob:1, burner:1}},
+  {id:'xl',     name:'XL',     sqft:'Up to 1,500 sqft', base:150, tile:50, inc:{counter:8, shelf:8, storage:8, sink:3, hob:1, burner:1}},
   {id:'over',   name:'Above 1,500 sqft', sqft:'needs a call', care:true}
 ];
-const KE_EXTRAS = [   // package items beyond the allowance
+// Package items beyond the allowance. Hob and stove / burner moved to the equipment step, 21 Oct.
+const KE_EXTRAS = [
   {id:'extra_counters_qty',         name:'Counters and work surfaces', inc:'counter', mins:10, max:30},
   {id:'extra_shelf_exterior_qty',   name:'Shelf exteriors',            inc:'shelf',   mins:10, max:30},
   {id:'extra_storage_exterior_qty', name:'Storage exteriors',          inc:'storage', mins:10, max:30},
-  {id:'extra_sink_qty',             name:'Sinks',                      inc:'sink',    mins:20, max:10},
-  {id:'extra_hob_qty',              name:'Hobs',                       inc:'hob',     mins:15, max:10},
-  {id:'extra_burner_qty',           name:'Stoves / burners',           inc:'burner',  mins:15, max:10}
+  {id:'extra_sink_qty',             name:'Sinks',                      inc:'sink',    mins:20, max:10}
 ];
 const KE_EQUIP = [
+  {g:'Cooking', id:'extra_hob_qty', name:'Hob', mins:15, inc:'hob', max:10},
+  {g:'Cooking', id:'extra_burner_qty', name:'Stove / burner', mins:15, inc:'burner', max:10},
   {g:'Cooking', id:'griddle', name:'Griddle / Hot plate', mins:15},
   {g:'Cooking', id:'deep_fryer', name:'Deep fryer', mins:20},
   {g:'Cooking', id:'oven', name:'Oven', mins:10},
@@ -602,17 +645,18 @@ const KE_EQUIP = [
 const KE_INC_LABEL = {counter:'Counters and work surfaces', shelf:'Shelf exteriors', storage:'Storage exteriors',
                       sink:'Sinks', hob:'Hob', burner:'Stove / burner'};
 
-/* ---------- 8. Loading & Unloading (development brief, 14 Oct) ---------- */
+/* ---------- 8. Loading & Unloading (brief 14 Oct; revised 21 Oct) ---------- */
 const LU_SERVICE = [
   {id:'loading',           name:'Loading only',        help:'Into the vehicle',      mult:1.0},
   {id:'unloading',         name:'Unloading only',      help:'Out of the vehicle',    mult:1.0},
   {id:'loading_unloading', name:'Loading & Unloading', help:'Both ends of the move', mult:1.75}
 ];
+// Minutes per item revised 21 Oct. XL and Heavy both go to a call.
 const LU_SIZE = [
-  {id:'small',  label:'Small',  sub:'up to 10 kg', mins:1.0},
-  {id:'medium', label:'Medium', sub:'11 to 25 kg', mins:1.5},
-  {id:'large',  label:'Large',  sub:'26 to 50 kg', mins:2.5},
-  {id:'xl',     label:'XL',     sub:'51 to 75 kg', mins:4.0},
+  {id:'small',  label:'Small',  sub:'up to 10 kg', mins:1},
+  {id:'medium', label:'Medium', sub:'11 to 25 kg', mins:2},
+  {id:'large',  label:'Large',  sub:'26 to 50 kg', mins:3},
+  {id:'xl',     label:'XL',     sub:'51 to 75 kg', mins:4, care:true},
   {id:'heavy',  label:'Heavy',  sub:'above 75 kg', care:true}
 ];
 const LU_TYPES = [
@@ -623,30 +667,20 @@ const LU_TYPES = [
   {id:'roll', label:'Roll', f:1.00},
   {id:'furniture_equipment', label:'Furniture / Equipment', f:1.25}
 ];
-const LU_DIST = [
-  {id:'distance_none',  label:'None',            f:1.0},
-  {id:'distance_0_25',  label:'Up to 25 m more', f:1.2},
-  {id:'distance_26_50', label:'26 to 50 m more', f:1.4}
-];
+const LU_FT_INCLUDED = 50;   // ft, set 21 Oct
+const LU_FT_PCT = 0.05;      // each extra 25 ft adds 5% to the job, set 21 Oct
 const newLine = () => ({size:'small', qty:1, types:['carton_box'], crate:'', furn:''});
 
-// Shared by Garbage and Loading & Unloading: the factor is about floors travelled.
-function accessFactor(sameFloor, lift, n){
-  if (sameFloor) return {f:1.0, label:'Ground floor'};
-  const pl = n > 1 ? 's' : '';
-  if (lift) return {f: n <= 3 ? 1.1 : (n <= 6 ? 1.2 : 1.3), label:`Lift, floor ${n}`};
-  if (n >= 4) return {stop:true, label:`Stairs, floor ${n}`};
-  return {f:{1:1.25,2:1.5,3:1.75}[n], label:`Stairs, floor ${n}`};
-}
 function luLineCard(l, i, n){
   const has = t => l.types.indexOf(t) > -1;
+  const size = LU_SIZE.find(x => x.id === l.size);
   return `<div class="linecard">
     <div class="linehead"><span class="linetitle">Item ${i+1}</span>
       ${n > 1 ? `<button class="linerm" data-rm="${i}">Remove</button>` : ''}</div>
     <div class="sectitle">Size and weight</div>
     <div class="chips">${LU_SIZE.map(s =>
       `<button class="chip" data-line="${i}" data-size="${s.id}" aria-pressed="${l.size===s.id}">${s.label}<span class="sub">${s.sub}</span></button>`).join('')}</div>
-    ${l.size === 'heavy' ? `<div class="warnnote"><strong>Items above 75 kg.</strong> We take these over a call so the team can plan the lift safely.</div>` : ''}
+    ${size.care ? `<div class="warnnote"><strong>Items above 50 kg.</strong> We take these over a call so the team can plan the lift safely.</div>` : ''}
     <div class="row"><span class="rname">How many items?</span>
       <span class="numfield"><input type="number" inputmode="numeric" min="1" value="${l.qty||''}" placeholder="0"
         data-line="${i}" data-field="qty"><span class="u">items</span></span></div>
@@ -693,7 +727,13 @@ function addonMins(a, v){
 function addonRows(list, qty){
   return `<div class="rows">` + list.map(a => {
     const v = qty[a.id] || 0, m = addonMins(a, v);
-    const sub = a.desc + (m ? ` · ${m} min` : '');
+    const sub = a.desc + (v && a.fmt ? ` · ${a.fmt(v)}` : '') + (m ? ` · ${m} min` : '');
+    if (a.choices) return `<div class="row pickrow ${v?'on':''}">
+        <span class="rname">${a.name}<span class="rsub">${sub}</span></span>
+        <div class="chips" data-input="pick" data-key="qty.${a.id}">
+          <button class="chip" data-v="0" aria-pressed="${!v}">None</button>
+          ${a.choices.map(c => `<button class="chip" data-v="${c}" aria-pressed="${v===c}">${c.toLocaleString()} ${a.unit}</button>`).join('')}
+        </div></div>`;
     return a.kind === 'area'
       ? UI.numRow('qty.'+a.id, a.name, sub, v, a.unit, v>0)
       : UI.stepRow('qty.'+a.id, a.name, sub, v, 0, 99, v>0);
@@ -704,6 +744,7 @@ function addonLines(list, qty){
              .map(a => ({a, qty:qty[a.id], mins:addonMins(a, qty[a.id])}));
 }
 function addonText(a, v){
+  if (a.fmt) return a.fmt(v);
   return a.kind === 'area' ? `${Number(v).toLocaleString()} ${a.unit}` : plural(v, a.unit);
 }
 
@@ -715,6 +756,7 @@ const SERVICES = [
 /* ===== TOILET CLEANING ===== */
 {
   id:'toilet_cleaning', name:'Toilet Cleaning', cat:'Cleaning', icon:I.wc,
+  skipDetails:true, contentOnReview:true,
   tagline:'Washroom cleaning priced on facility size and fixture counts',
   sub:'Toilet cleaning based on facility type and fixture quantities.',
   content:{
@@ -765,6 +807,7 @@ const SERVICES = [
 /* ===== OPENING & CLOSING CLEANING ===== */
 {
   id:'opening_closing', name:'Opening & Closing Cleaning', cat:'Cleaning', icon:I.spray,
+  skipDetails:true, contentOnReview:true,
   tagline:'Dining and front-of-house cleaning, before open or after close',
   sub:'Restaurant dining and front-of-house cleaning, before you open or after you close.',
   content:{
@@ -807,18 +850,24 @@ const SERVICES = [
   id:'kitchen_equipment_cleaning', name:'Kitchen Equipment Cleaning', cat:'Cleaning', icon:I.pot,
   tagline:'Deep cleaning of cooking, cold-storage and prep equipment',
   sub:'Deep cleaning of cooking, cold-storage and prep equipment. Your package scope loads from your kitchen size.',
+  skipDetails:true, contentOnReview:true,
   content:{
-    included:['Package quantities load automatically once you pick your kitchen size',
-      'Counters and work surfaces, up to the package allowance','Shelf and storage exteriors, up to the package allowance',
+    included:['Counters and work surfaces, up to the package allowance','Shelf and storage exteriors, up to the package allowance',
       'Sinks, up to the package allowance','One hob and one stove / burner','Basic surface degreasing'],
     notIncluded:['Extra equipment or items beyond the package allowance, unless you add them'],
     ready:null,
-    how:['Choose your kitchen size and your package scope loads automatically','Add only the extra items and equipment you need',
+    how:['Choose your kitchen size and your package scope loads automatically','Add only the extra equipment and items you need',
          'We work out the team, the time on site and the price']
+  },
+  // On review, Included shows the actual quantities of the package they picked.
+  reviewIncluded:st => {
+    const s = KE_SIZES.find(x => x.id === st.size);
+    return [`${s.inc.counter} counters and work surfaces`, `${s.inc.shelf} shelf exteriors`, `${s.inc.storage} storage exteriors`,
+            plural(s.inc.sink,'sink'), 'One hob and one stove / burner', 'Basic surface degreasing'];
   },
   init:() => ({size:'medium',
     qty:Object.fromEntries(KE_EXTRAS.map(x=>[x.id,0]).concat(KE_EQUIP.map(x=>[x.id,0]))),
-    floor:false, tile:false, note:''}),
+    tile:false, note:''}),
   steps:[
     {title:'Your kitchen', build:st => {
       const s = KE_SIZES.find(x => x.id === st.size);
@@ -829,41 +878,41 @@ const SERVICES = [
               `<span>${KE_INC_LABEL[k]}</span><span>${s.inc[k]}</span>`).join('')}</div>
              <div class="note" style="margin-top:9px">Basic surface degreasing is part of every package.</div>`));
     }},
-    {title:'Extra items', build:st => {
-      const s = KE_SIZES.find(x => x.id === st.size);
-      return UI.q('Need more than your package covers?','Only add the quantity above your allowance.',
-        `<div class="rows">` + KE_EXTRAS.map(x => {
-          const v = st.qty[x.id];
-          return UI.stepRow('qty.'+x.id, x.name, `${s.inc[x.inc]} included · ${x.mins} min each extra${v?` · ${v*x.mins} min`:''}`, v, 0, x.max, v>0);
-        }).join('') + `</div>`);
-    }},
     {title:'Equipment', build:st => {
       const s = KE_SIZES.find(x => x.id === st.size);
       const groups = ['Cooking','Cold storage','Surfaces','Machines','Other'];
-      return UI.q('Which other equipment needs cleaning?','None of these are in the package. Leave them at zero if you do not need them.',
+      return UI.q('Which equipment needs cleaning?','One hob and one stove / burner are in your package. Add anything else, or leave it at zero.',
           groups.map(g => `<div class="grouplabel">${g}</div><div class="rows">` +
             KE_EQUIP.filter(e => e.g === g).map(e => {
               const v = st.qty[e.id];
-              return UI.stepRow('qty.'+e.id, e.name, `${e.mins} min each${v?` · ${v*e.mins} min`:''}`, v, 0, 99, v>0);
-            }).join('') + `</div>`).join(''))
-        + UI.q('Floor and wall tiles','Sized to your kitchen.',
-            UI.toggle('floor','Floor cleaning', `${s.floor} min for a ${s.name.toLowerCase()} kitchen`, st.floor)
-            + UI.toggle('tile','Tile cleaning, up to 6 ft', `${s.tile} min for a ${s.name.toLowerCase()} kitchen`, st.tile))
+              const sub = e.inc ? `${s.inc[e.inc]} included · ${e.mins} min each extra` : `${e.mins} min each`;
+              return UI.stepRow('qty.'+e.id, e.inc ? 'Extra ' + e.name.toLowerCase() : e.name,
+                sub + (v ? ` · ${v*e.mins} min` : ''), v, 0, e.max || 99, v>0);
+            }).join('') + `</div>`).join(''));
+    }},
+    {title:'Extra items', build:st => {
+      const s = KE_SIZES.find(x => x.id === st.size);
+      return UI.q('Need more than your package covers?','Only add the quantity above your allowance.',
+          `<div class="rows">` + KE_EXTRAS.map(x => {
+            const v = st.qty[x.id];
+            return UI.stepRow('qty.'+x.id, x.name, `${s.inc[x.inc]} included · ${x.mins} min each extra${v?` · ${v*x.mins} min`:''}`, v, 0, x.max, v>0);
+          }).join('') + `</div>`)
+        + UI.q('Wall tiles','Sized to your kitchen.',
+            UI.toggle('tile','Tile cleaning, up to 6 ft', `${s.tile} min for a ${s.name.toLowerCase()} kitchen`, st.tile))
         + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, 'Fryer oil is drained, chimney filters are in the sink'));
     }}
   ],
   calc:st => {
     const s = KE_SIZES.find(x => x.id === st.size);
     if (s.care) return {care:true, reason:'A kitchen above 1,500 sqft', s};
-    const extras = KE_EXTRAS.filter(x => st.qty[x.id] > 0).map(x => ({name:x.name, qty:st.qty[x.id], mins:st.qty[x.id]*x.mins}));
-    const equip = KE_EQUIP.filter(x => st.qty[x.id] > 0).map(x => ({name:x.name, qty:st.qty[x.id], mins:st.qty[x.id]*x.mins}));
-    const workload = s.base + extras.concat(equip).reduce((a,l)=>a+l.mins,0) + (st.floor?s.floor:0) + (st.tile?s.tile:0);
+    const pick = list => list.filter(x => st.qty[x.id] > 0).map(x => ({x, qty:st.qty[x.id], mins:st.qty[x.id]*x.mins}));
+    const equip = pick(KE_EQUIP), extras = pick(KE_EXTRAS);
+    const workload = s.base + equip.concat(extras).reduce((a,l)=>a+l.mins,0) + (st.tile ? s.tile : 0);
     return Object.assign({s, extras, equip}, staffing(workload));
   },
   rows:(st,r) => [['Kitchen', r.s.name + ' · ' + r.s.sqft.toLowerCase()]]
-    .concat(r.extras.map(l => ['Extra ' + l.name.toLowerCase(), l.qty]))
-    .concat(r.equip.map(l => [l.name, l.qty]))
-    .concat(st.floor ? [['Floor cleaning','Yes']] : [])
+    .concat(r.equip.map(l => [l.x.inc ? 'Extra ' + l.x.name.toLowerCase() : l.x.name, l.qty]))
+    .concat(r.extras.map(l => ['Extra ' + l.x.name.toLowerCase(), l.qty]))
     .concat(st.tile ? [['Tile cleaning','Yes']] : [])
 },
 
@@ -872,6 +921,7 @@ const SERVICES = [
   id:'kst_dishwashing', name:'KST / Dishwashing', cat:'Cleaning', icon:I.dish,
   tagline:'Utensil washing priced on your total count, not item by item',
   sub:'Utensil washing support, priced on your total count rather than item by item.',
+  skipDetails:true,
   content:{
     included:['Plates and bowls','Cups and glasses','Cutlery','Small cookware',
       'Regular pots and kadai, under 30 L','GN containers','Trays','Other regular utensils'],
@@ -888,10 +938,10 @@ const SERVICES = [
   },
   init:() => ({pkg:'pkg_moderate', qty:Object.fromEntries(DW_ADDONS.map(a=>[a.id,0])), difficult:false, accepted:false, note:''}),
   steps:[
-    {title:'How much', build:st =>
+    {title:'How much', content:true, build:st =>
       UI.q('How many utensils, all together?',
         'Plates, glasses, cutlery, pots, trays — one number for the lot. No need to split them by type.',
-        UI.cards('pkg', DW_PACKAGES, st.pkg, {sub:'pcs'}))},
+        UI.cards('pkg', DW_PACKAGES, st.pkg, {sub:'sub'}))},
     {title:'Add-ons', build:st => ''
       + UI.q("Anything that isn't a regular utensil?",'All optional, and each one is added on top of your package.',
           addonRows(DW_ADDONS, st.qty))
@@ -907,7 +957,7 @@ const SERVICES = [
     const workload = p.base + lines.reduce((s,l)=>s+l.mins,0);
     return Object.assign({p, lines}, staffing(workload));
   },
-  rows:(st,r) => [['Utensils', r.p.name + ' · ' + r.p.pcs.toLowerCase()]]
+  rows:(st,r) => [['Utensils', r.p.name]]
     .concat(r.lines.map(l => [l.a.name, addonText(l.a, l.qty)])),
   disclaimer:{
     title:'Before you confirm',
@@ -921,17 +971,19 @@ const SERVICES = [
   id:'loading_unloading', name:'Loading & Unloading', cat:'Operations', icon:I.truck,
   tagline:'Goods moved into or out of a vehicle, priced on size, count and access',
   sub:'On-demand loading and unloading support based on item size, quantity and access.',
+  skipDetails:true, contentOnReview:true,
   content:{
     included:['Pick items from your source or staging point, for loading','Carry items to the vehicle, for loading',
       'Load items into the vehicle','Remove items from the vehicle, for unloading',
-      'Carry items to your destination point','Place items in the designated area'],
+      'Carry items to your destination point','Place items in the designated area',
+      `Carrying distance up to ${LU_FT_INCLUDED} ft between the vehicle and the drop point`],
     notIncluded:['Basic stacking or arrangement, unless agreed separately'],
     ready:null,
-    how:['Choose the service and tell us about access','Add each kind of item: size, how many and what type',
+    how:['Choose the service, the access and the distance','Add each kind of item: size, how many and what type',
          'We work out the team, the time on site and the price']
   },
   init:() => ({service_type:'loading', ground_floor:true, service_lift:true, floor_number:1,
-               additional_distance:'distance_none', lines:[newLine()], note:''}),
+               extraFt:0, lines:[newLine()], note:''}),
   steps:[
     {title:'Service and access', build:st => {
       let h = UI.q('What service do you need?','', UI.cards('service_type', LU_SERVICE, st.service_type, {}))
@@ -939,28 +991,32 @@ const SERVICES = [
             UI.seg('ground_floor', [{v:'yes',n:'Ground floor'},{v:'no',n:'Upper floor'}], st.ground_floor?'yes':'no'));
       if (!st.ground_floor){
         h += UI.q('Is a service lift available?','', UI.seg('service_lift', [{v:'yes',n:'Lift'},{v:'no',n:'Stairs only'}], st.service_lift?'yes':'no'));
-        h += UI.q('Which floor?','', `<div class="rows">` + UI.stepRow('floor_number','Floor','', st.floor_number, 1, 10, true) + `</div>`);
-        if (!st.service_lift && st.floor_number >= 4)
-          h += `<div class="warnnote"><strong>Stairs above the third floor.</strong> We take this one over a call instead of online.</div>`;
+        h += UI.q('Which floor?', st.service_lift ? '' : `Stairs are booked online up to floor ${STAIRS_MAX}.`,
+          `<div class="rows">` + UI.stepRow('floor_number','Floor','', st.floor_number, 1, 10, true) + `</div>`);
+        if (!st.service_lift && st.floor_number > STAIRS_MAX)
+          h += `<div class="warnnote"><strong>Stairs above floor ${STAIRS_MAX}.</strong> We take this one over a call instead of online.</div>`;
       }
+      h += UI.q('Any extra carrying distance?',
+        `${LU_FT_INCLUDED} ft between the vehicle and the drop point is included. Each extra ${FT_STEP} ft adds 5% to the time.`,
+        `<div class="rows">` + UI.stepRow('extraFt','Extra distance',
+          st.extraFt ? `${LU_FT_INCLUDED + st.extraFt*FT_STEP} ft in total` : `None beyond the ${LU_FT_INCLUDED} ft included`,
+          st.extraFt, 0, 20, st.extraFt>0, st.extraFt ? `+${st.extraFt*FT_STEP} ft` : '0') + `</div>`);
       return h;
     }},
     {title:'What are we moving', bind:luBind, build:st =>
       `<div class="q"><div class="qlabel">What are we moving?</div>
         <div class="qhelp">Add one line for each kind of item. Mixed sizes go on separate lines.</div></div>`
       + st.lines.map((l,i) => luLineCard(l, i, st.lines.length)).join('')
-      + `<button class="addline" id="addline">+ Add another item</button>`},
-    {title:'Distance', build:st => ''
-      + UI.q('Any extra carrying distance?','Beyond the standard 25 m between the vehicle and the drop point.',
-          UI.chips('additional_distance', LU_DIST, st.additional_distance))
+      + `<button class="addline" id="addline">+ Add another item</button>`
       + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, 'Truck parks at the back gate, dock 2'))}
   ],
   valid:st => st.lines.length > 0 && st.lines.every(luLineValid),
   calc:st => {
-    // Hard stops first, Heavy before stairs, before any arithmetic.
-    if (st.lines.some(l => l.size === 'heavy')) return {care:true, reason:'Items above 75 kg'};
+    // Hard stops first, before any arithmetic: anything above 50 kg, then stairs above floor 6.
+    if (st.lines.some(l => LU_SIZE.find(x => x.id === l.size).care)) return {care:true, reason:'Items above 50 kg'};
     const a = accessFactor(st.ground_floor, st.service_lift, st.floor_number);
-    if (a.stop) return {care:true, reason:'Stairs above the third floor', a};
+    if (a.stop) return {care:true, reason:`Stairs above floor ${STAIRS_MAX}`, a};
+    a.label = a.mode === 'same' ? 'Ground floor' : `${a.mode === 'lift' ? 'Lift' : 'Stairs'}, floor ${st.floor_number}`;
     const lines = st.lines.map(l => {
       const s = LU_SIZE.find(x => x.id === l.size);
       const fs = l.types.map(t => LU_TYPES.find(x => x.id === t).f);
@@ -968,12 +1024,12 @@ const SERVICES = [
       return {l, s, tf, mins:(l.qty||0) * s.mins * tf};
     });
     const svcT = LU_SERVICE.find(x => x.id === st.service_type);
-    const dist = LU_DIST.find(x => x.id === st.additional_distance);
-    const workload = lines.reduce((p,x)=>p+x.mins,0) * svcT.mult * dist.f * a.f;
-    return Object.assign({lines, svcT, dist, a}, staffing(workload));
+    const df = 1 + LU_FT_PCT * st.extraFt;
+    const workload = lines.reduce((p,x)=>p+x.mins,0) * svcT.mult * df * a.f;
+    return Object.assign({lines, svcT, df, a}, staffing(workload));
   },
   rows:(st,r) => [['Service', r.svcT.name], ['Access', r.a.label + (r.a.f !== 1 ? ` · ×${r.a.f}` : '')]]
-    .concat(r.dist.f !== 1 ? [['Extra distance', r.dist.label]] : [])
+    .concat(st.extraFt ? [['Extra distance', `+${st.extraFt*FT_STEP} ft · ×${r2(r.df)}`]] : [])
     .concat(r.lines.map((x,i) => [`Item ${i+1}`,
       `${x.l.qty} × ${x.s.label} · ${x.l.types.map(t => LU_TYPES.find(y=>y.id===t).label).join(', ')}`]))
 },
@@ -983,9 +1039,10 @@ const SERVICES = [
   id:'garbage_waste', name:'Garbage & Waste Handling', cat:'Operations', icon:I.bin,
   tagline:'Dry, wet or mixed waste moved to your disposal point',
   sub:'On-demand dry, wet or mixed waste movement to a designated disposal point.',
+  skipDetails:true,
   content:{
     included:['Dry waste handling: cartons, packaging, paper and plastic','Wet waste handling: food waste',
-      'Movement to your disposal point, within the standard 25 m','Ground floor, lift or stairs worked into the time'],
+      `Movement to your disposal point, up to ${GARB_FT_INCLUDED} ft`,'Ground floor, lift or stairs worked into the time'],
     notIncluded:['Hazardous, biomedical, chemical or regulated waste',
       'Waste transport beyond the designated disposal point, unless arranged separately'],
     ready:null,
@@ -993,9 +1050,9 @@ const SERVICES = [
          'We work out the team, the time on site and the price']
   },
   init:() => ({waste:'dry', dry:'dry_small', dryBlocks:0, wet:'wet_small', wetBlocks:0,
-               sameFloor:true, lift:true, floors:1, dist:'distance_none', note:''}),
+               sameFloor:true, lift:true, floors:1, extraFt:0, note:''}),
   steps:[
-    {title:'The waste', build:st => {
+    {title:'The waste', content:true, build:st => {
       const hasDry = st.waste === 'dry' || st.waste === 'mixed';
       const hasWet = st.waste === 'wet' || st.waste === 'mixed';
       const d = G_DRY.find(x => x.id === st.dry), w = G_WET.find(x => x.id === st.wet);
@@ -1017,14 +1074,17 @@ const SERVICES = [
       let h = UI.q('Is the disposal point on the same floor?','This is about how many floors the waste travels, not which floor the building is on.',
         UI.seg('sameFloor', [{v:'yes',n:'Same floor'},{v:'no',n:'Different floor'}], st.sameFloor?'yes':'no'));
       if (!st.sameFloor){
-        h += UI.q('Is there a lift?','', UI.seg('lift', [{v:'yes',n:'Lift'},{v:'no',n:'Stairs only'}], st.lift?'yes':'no'));
-        h += UI.q('How many floors does the waste travel?','',
+        h += UI.q('Is there a service lift?','', UI.seg('lift', [{v:'yes',n:'Lift'},{v:'no',n:'Stairs only'}], st.lift?'yes':'no'));
+        h += UI.q('How many floors does the waste travel?', st.lift ? '' : `Stairs are booked online up to ${STAIRS_MAX} floors.`,
           `<div class="rows">` + UI.stepRow('floors','Floors','between pickup and disposal', st.floors, 1, 20, true) + `</div>`);
-        if (!st.lift && st.floors >= 4)
-          h += `<div class="warnnote"><strong>Stairs above the third floor.</strong> We take this one over a call instead of online.</div>`;
+        if (!st.lift && st.floors > STAIRS_MAX)
+          h += `<div class="warnnote"><strong>Stairs above ${STAIRS_MAX} floors.</strong> We take this one over a call instead of online.</div>`;
       }
-      h += UI.q('How far is the disposal point?','Beyond the standard 25 m included in the service.',
-        UI.chips('dist', G_DIST, st.dist));
+      h += UI.q('Any extra distance to the disposal point?',
+        `${GARB_FT_INCLUDED} ft is included. Each extra ${FT_STEP} ft adds ${GARB_FT_STEP_MIN} min.`,
+        `<div class="rows">` + UI.stepRow('extraFt','Extra distance',
+          st.extraFt ? `${GARB_FT_INCLUDED + st.extraFt*FT_STEP} ft in total · +${st.extraFt*GARB_FT_STEP_MIN} min` : `None beyond the ${GARB_FT_INCLUDED} ft included`,
+          st.extraFt, 0, 20, st.extraFt>0, st.extraFt ? `+${st.extraFt*FT_STEP} ft` : '0') + `</div>`);
       h += UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, 'Bins are behind the kitchen, gate code 4410'));
       return h;
     }}
@@ -1032,15 +1092,10 @@ const SERVICES = [
   calc:st => {
     const hasDry = st.waste === 'dry' || st.waste === 'mixed';
     const hasWet = st.waste === 'wet' || st.waste === 'mixed';
-    let a;
-    if (st.sameFloor) a = {f:1.0, label:'Same floor'};
-    else {
-      const n = st.floors, pl = n > 1 ? 's' : '';
-      if (st.lift) a = {f: n <= 3 ? 1.1 : (n <= 6 ? 1.2 : 1.3), label:`Lift, ${n} floor${pl}`};
-      else if (n >= 4) a = {stop:true, label:`Stairs, ${n} floors`};
-      else a = {f:{1:1.25,2:1.5,3:1.75}[n], label:`Stairs, ${n} floor${pl}`};
-    }
-    if (a.stop) return {care:true, reason:'Stairs above the third floor', a};
+    const a = accessFactor(st.sameFloor, st.lift, st.floors);
+    if (a.stop) return {care:true, reason:`Stairs above ${STAIRS_MAX} floors`, a};
+    const n = st.floors, pl = n > 1 ? 's' : '';
+    a.label = a.mode === 'same' ? 'Same floor' : `${a.mode === 'lift' ? 'Lift' : 'Stairs'}, ${n} floor${pl}`;
     const d = G_DRY.find(x => x.id === st.dry), w = G_WET.find(x => x.id === st.wet);
     let dryBase = 0, dryMix = 0, wetBase = 0, wetMix = 0;
     if (hasDry){ dryBase = d.base + (d.custom ? st.dryBlocks*DRY_BLOCK : 0); dryMix = d.mix + (d.custom ? st.dryBlocks*DRY_BLOCK_MIX : 0); }
@@ -1049,16 +1104,16 @@ const SERVICES = [
     if (st.waste === 'dry') subtotal = dryBase;
     else if (st.waste === 'wet') subtotal = wetBase;
     else subtotal = dryBase >= wetBase ? dryBase + wetMix : wetBase + dryMix;
-    const dist = G_DIST.find(x => x.id === st.dist);
-    const workload = r2(subtotal * a.f + dist.mins);
-    return Object.assign({a, subtotal, dist, d, w}, staffing(workload));
+    const distMins = st.extraFt * GARB_FT_STEP_MIN;
+    const workload = subtotal * a.f + distMins;
+    return Object.assign({a, subtotal, distMins, d, w}, staffing(workload));
   },
   rows:(st,r) => {
     const out = [['Waste type', st.waste === 'dry' ? 'Dry' : st.waste === 'wet' ? 'Wet' : 'Mixed']];
     if (st.waste !== 'wet') out.push(['Dry waste', r.d.label + ' · ' + r.d.sub + (r.d.custom && st.dryBlocks ? ` +${st.dryBlocks} blocks` : '')]);
     if (st.waste !== 'dry') out.push(['Wet waste', r.w.label + ' · ' + r.w.sub + (r.w.custom && st.wetBlocks ? ` +${st.wetBlocks} blocks` : '')]);
     out.push(['Access', r.a.label + (r.a.f !== 1 ? ` · ×${r.a.f}` : '')]);
-    if (r.dist.mins) out.push(['Extra distance', r.dist.label + ' · +' + r.dist.mins + ' min']);
+    if (st.extraFt) out.push(['Extra distance', `+${st.extraFt*FT_STEP} ft · +${r.distMins} min`]);
     return out;
   }
 },
@@ -1166,19 +1221,20 @@ const SERVICES = [
   id:'guest_assistance_server', name:'Guest Assistance & Server', cat:'Front of house', icon:I.person,
   tagline:'Trained server support, booked by the hour and the head',
   sub:'Trained server support for guest service, table management and dining operations.',
+  skipDetails:true,
   content:{
-    included:['Welcoming and seating guests','Menu handout and basic menu explanation','Taking food and beverage orders manually',
+    included:['Welcoming and seating guests','Menu handout','Taking food and beverage orders manually',
       'Coordinating with kitchen and bar','Serving food and beverages to tables','Refilling water and table essentials on request',
       'Basic guest assistance and handling requests','Keeping the assigned tables clean and organised','Supporting a smooth dining experience'],
     notIncluded:['Food preparation or cooking','Dishwashing and KST work',
       'Deep cleaning, washroom cleaning or equipment cleaning','Heavy lifting or stock movement',
       'Barista, bartending or cashiering, unless agreed separately','Operating your POS or billing system'],
     ready:null,
-    how:['Choose how long you need cover for','Choose how many servers you need','Pick your date and start time, and we confirm the team']
+    how:['Choose how many servers you need','Choose how long you need cover for','Pick your date and start time, and we confirm the team']
   },
   block:true,
-  init:() => ({dur:'dur_4', extra:2, people:2, note:''}),
-  steps:blockSteps(null, {sub:{dur_2:'short service', dur_4:'full service'}, countQ:'How many servers?',
+  init:() => ({dur:'dur_4', extra:0, people:2, note:''}),
+  steps:blockSteps({contentOn:'count', sub:{dur_2:'short service', dur_4:'full service'}, countQ:'How many servers?',
     unit:'server', notePh:'Section by the window, formal service, black shirts please'}),
   calc:blockCalc,
   rows:(st,r) => [['Servers', r.people],['Base duration', r.base + ' hours']]
@@ -1192,6 +1248,7 @@ const SERVICES = [
   id:'pos_support', name:'POS Support', cat:'Front of house', icon:I.pos,
   tagline:'Counter cover: orders, POS and card payments',
   sub:'Trained counter cover: taking orders, running the POS, and getting customers paid and on their way.',
+  skipDetails:true,
   content:{
     included:['Handling customer orders at the counter','Taking orders and entering them into the POS','Operating the POS system',
       'Handling digital and card payments','Generating bills and receipts','Applying discounts and coupons as you instruct',
@@ -1201,13 +1258,13 @@ const SERVICES = [
       'Refund approvals and management decisions','POS hardware or software repairs','Inventory counting and stock auditing',
       'Food preparation or cooking','Work outside the assigned counter'],
     ready:['POS access and operating instructions'],
-    how:['Choose how long you need cover for','Choose how many professionals you need','Pick your date and start time, and we confirm the team']
+    how:['Choose how many professionals you need','Choose how long you need cover for','Pick your date and start time, and we confirm the team']
   },
   banner:{title:'Cash stays with your staff',
     text:'Our professionals take card and digital payments on your POS. They do not accept, hold or count cash, so please keep one of your own staff at the counter for cash billing.'},
   block:true,
-  init:() => ({dur:'dur_4', extra:2, people:2, note:''}),
-  steps:blockSteps(null, {sub:{dur_2:'peak cover', dur_4:'half shift'}, countQ:'How many professionals?',
+  init:() => ({dur:'dur_4', extra:0, people:2, note:''}),
+  steps:blockSteps({contentOn:'duration', sub:{dur_2:'peak cover', dur_4:'half shift'}, countQ:'How many professionals?',
     unit:'professional', notePh:'Counter 2 only, the till code is on a card by the screen'}),
   calc:blockCalc,
   rows:(st,r) => [['Professionals', r.people],['Base duration', r.base + ' hours']]
@@ -1221,6 +1278,7 @@ const SERVICES = [
   id:'busser_table_support', name:'Busser & Table Support', cat:'Front of house', icon:I.tray,
   tagline:'Clearing, wiping and resetting tables during service',
   sub:'Trained floor support that clears, wipes and resets tables so the next guests can sit down.',
+  skipDetails:true,
   content:{
     included:['Clearing used plates, glasses and cutlery from tables','Wiping and resetting tables','Chair arrangement',
       'Supporting food runners from kitchen pickup to dining tables','Moving used items to the dishwashing area',
@@ -1230,25 +1288,16 @@ const SERVICES = [
     ready:['Cloths and a mop or spill kit for floor spots','Bus tubs or trays for clearing',
       'A quick briefing on the table layout and where used items are dropped'],
     readyDraft:true,
-    how:['Choose how long you need cover for','Choose how many people you need on the floor','Pick your date and start time, and we confirm the team'],
-    howDraft:true
+    how:['Choose how many people you need on the floor','Choose how long you need cover for','Pick your date and start time, and we confirm the team']
   },
   block:true,
-  init:() => ({dur:'dur_4', extra:1, people:2, packing:false, note:''}),
-  steps:blockSteps(null, {sub:{dur_2:'service rush', dur_4:'full service'}, countQ:'How many people on the floor?',
-    unit:'person', notePh:'Clear the terrace section first, drop point is behind the bar',
-    extraInput: st => UI.sec('Optional',
-      UI.toggle('packing','Takeaway packing support',
-        'Tell us if you also want help at the takeaway counter. We will confirm what it covers and what it costs before the booking is finalised.',
-        st.packing))}),
+  init:() => ({dur:'dur_4', extra:0, people:2, note:''}),
+  steps:blockSteps({contentOn:'duration', sub:{dur_2:'service rush', dur_4:'full service'}, countQ:'How many people on the floor?',
+    unit:'person', notePh:'Clear the terrace section first, drop point is behind the bar'}),
   calc:blockCalc,
   rows:(st,r) => [['People', r.people],['Base duration', r.base + ' hours']]
     .concat(r.extra ? [['Extra hours','+' + r.extra + ' each']] : [])
-    .concat([['Each person works', hhmm(r.per*60)]])
-    .concat(st.packing ? [['Takeaway packing','Requested']] : []),
-  reviewNote: st => st.packing
-    ? "You asked about takeaway packing support. We'll come back to you on what it covers and what it adds before the booking is confirmed."
-    : '',
+    .concat([['Each person works', hhmm(r.per*60)]]),
   careReason:'More than 4 people on the floor'
 }
 ];
@@ -1340,7 +1389,7 @@ function renderHome(){
           <span class="chev">${I.chev}</span>
         </button>`).join('') + `</div>`).join('');
   $screen.querySelectorAll('.svc').forEach(b => b.onclick = () => {
-    svc = byId(b.dataset.s); st = svc.init(); stepIx = 0; view = 'service'; render();
+    svc = byId(b.dataset.s); st = svc.init(); stepIx = 0; view = svc.skipDetails ? 'form' : 'service'; render();
   });
   tabs('home');
 }
@@ -1400,7 +1449,8 @@ function renderForm(r){
   const step = svc.steps[stepIx];
   bar(svc.name, `Step ${stepIx+1} of ${total} · ${step.title}`, total, stepIx);
   $screen.scrollTop = 0;
-  $screen.innerHTML = step.build(st, r);
+  $screen.innerHTML = step.build(st, r)
+    + (step.content ? `<div class="sepline"></div>` + contentHTML(svc, st, 'step') : '');
   bindInputs();
   if (step.bind) step.bind($screen);
   const blocked = !r.care && svc.valid && !svc.valid(st);
@@ -1438,7 +1488,7 @@ function renderReview(r){
         + (st.note ? `<div class="li"><span class="k">Note</span><span class="v">${esc(st.note.slice(0,32))}${st.note.length>32?'…':''}</span></div>` : '')}</div>`)
     + UI.sec('Estimated price', `<div class="list"><div class="li"><span class="k">${svc.name}</span><span class="tbc">Price to be confirmed</span></div></div>
         <div class="qhelp" style="margin-top:8px">Prices are not set yet, so nothing is charged on this screen.</div>`)
-    + (!r.blocks && r.pros === 2 ? `<div class="note"><strong>Why 2 professionals?</strong> Jobs over 4 hours of work get two professionals working together, so the same work takes half the time on site.</div>` : '')
+    + (svc.contentOnReview ? contentHTML(svc, st, 'review') : '')
     + (svc.banner ? `<div class="warnnote"><strong>${svc.banner.title}</strong><br>${svc.banner.text}</div>` : '')
     + (note ? `<div class="note">${note}</div>` : '')
     + (svc.disclaimer ? `<div class="disclaim">
@@ -1538,6 +1588,9 @@ function bindInputs(){
   $screen.querySelectorAll('[data-input="seg"] button, [data-input="card"] button').forEach(b => {
     b.onclick = () => { setKey(b.closest('[data-key]').dataset.key, b.dataset.v); render(); };
   });
+  $screen.querySelectorAll('[data-input="pick"] button').forEach(b => {
+    b.onclick = () => { setKey(b.closest('[data-key]').dataset.key, Number(b.dataset.v)); render(); };
+  });
   $screen.querySelectorAll('[data-input="people"] button').forEach(b => {
     b.onclick = () => {
       if (b.dataset.v === 'more'){ view = 'care'; render(); return; }
@@ -1585,6 +1638,7 @@ function goBack(){
   if (view === 'care'){ view = 'form'; return render(); }
   if (view === 'form'){
     if (stepIx > 0){ stepIx--; return render(); }
+    if (svc.skipDetails){ view = 'home'; svc = null; return render(); }
     view = 'service'; return render();
   }
   if (view === 'review'){ view = 'form'; stepIx = svc.steps.length - 1; return render(); }
