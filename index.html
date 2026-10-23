@@ -985,7 +985,8 @@ const SERVICES = [
   init:() => ({service_type:'loading', ground_floor:true, service_lift:true, floor_number:1,
                extraFt:0, lines:[newLine()], note:''}),
   steps:[
-    {title:'Service and access', build:st => {
+    // No items exist yet on this step, so a time here would only reflect the placeholder line.
+    {title:'Service and access', hideEstimate:'Time on site shows once you add your items', build:st => {
       let h = UI.q('What service do you need?','', UI.cards('service_type', LU_SERVICE, st.service_type, {}))
         + UI.q('Is the destination on the ground floor?','Only the destination end affects the time.',
             UI.seg('ground_floor', [{v:'yes',n:'Ground floor'},{v:'no',n:'Upper floor'}], st.ground_floor?'yes':'no'));
@@ -1454,7 +1455,10 @@ function renderForm(r){
   bindInputs();
   if (step.bind) step.bind($screen);
   const blocked = !r.care && svc.valid && !svc.valid(st);
-  footerBar(estimateLine(r) + `<button class="btn" id="next" ${blocked?'disabled':''}>Continue</button>`);
+  const est = (!r.care && step.hideEstimate)
+    ? `<div class="estimate">${I.clock}<span>${step.hideEstimate}</span></div>`
+    : estimateLine(r);
+  footerBar(est + `<button class="btn" id="next" ${blocked?'disabled':''}>Continue</button>`);
   document.getElementById('next').onclick = () => {
     const rr = result();
     if (rr.care){ view = 'care'; render(); return; }
