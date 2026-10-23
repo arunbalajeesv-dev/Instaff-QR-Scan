@@ -209,8 +209,16 @@ button{font-family:inherit;cursor:pointer}
   border-radius:15px;display:flex;flex-direction:column;gap:8px}
 .ticklist li{display:flex;gap:9px;align-items:flex-start;font-size:12.8px;line-height:1.4;font-weight:600}
 .ticklist svg{flex:0 0 auto;color:var(--primary);margin-top:1px;width:14px;height:14px}
+.gotocard{display:flex;gap:11px;align-items:center;background:var(--white);border:1px dashed var(--tint-border);border-radius:16px;padding:12px 13px}
+.gotocard .rname{flex:1}
+.gotobtn{border:1px solid var(--tint-border);background:var(--tint);color:var(--dark);border-radius:11px;padding:9px 12px;font-size:12px;font-weight:800;flex:0 0 auto}
 .pickrow{flex-direction:column;align-items:stretch;gap:10px}
 .sepline{height:1px;background:var(--card-border);margin:2px 0}
+
+.tinput.big{font-size:15px;padding:13px}
+.opt{font-size:11px;font-weight:600;color:var(--muted);margin-left:6px}
+.hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+a.btn{text-decoration:none}
 
 /* ---- results ---- */
 .bigblock{background:var(--tint);border:1px solid var(--tint-border);border-radius:18px;padding:16px;
@@ -291,6 +299,15 @@ button{font-family:inherit;cursor:pointer}
 
 <script>
 "use strict";
+
+/* ============================================================
+   SMOKE TEST SETTINGS. These two lines are the only ones to fill in.
+   ============================================================ */
+// Google Apps Script web app URL, ending in /exec. Leave empty and leads are not sent anywhere.
+const SHEET_URL = '';
+// Optional. Your WhatsApp Business number, digits only with country code, e.g. 919876543210.
+// When filled in, the confirmation screen offers "Send these details on WhatsApp".
+const WHATSAPP_NUMBER = '';
 
 /* ============================================================
    ICONS
@@ -376,11 +393,11 @@ const UI = {
         <button data-d="1" ${val>=max?'disabled':''} aria-label="More">+</button>
       </span></div>`;
   },
-  numRow(key, name, sub, val, unit, on){
+  numRow(key, name, sub, val, unit, on, max){
     return `<div class="row ${on?'on':''}">
       <span class="rname">${name}${sub?`<span class="rsub">${sub}</span>`:''}</span>
       <span class="numfield"><input type="number" inputmode="numeric" min="0" value="${val||''}"
-        placeholder="0" data-input="num" data-key="${key}"><span class="u">${unit}</span></span></div>`;
+        placeholder="0" data-input="num" data-key="${key}" ${max ? `data-max="${max}"` : ''}><span class="u">${unit}</span></span></div>`;
   },
   people(key, sel, max){
     let h = `<div class="people" data-input="people" data-key="${key}">`;
@@ -719,10 +736,60 @@ function luBind(screen){
   });
 }
 
+/* ---------- 9. Service-Time Cleaning (corrected workbook, 23 Oct) ---------- */
+// The customer books live cleaning by duration: the package sets the minimum, the customer
+// adds time in 30-minute steps up to 240, and extras and add-ons are worker-time on top.
+const STC_PACKAGES = [
+  {id:'pkg_small',  name:'Small',         seats:'Up to 20 seats',  min:45},
+  {id:'pkg_medium', name:'Medium',        seats:'21 to 50 seats',  min:60},
+  {id:'pkg_large',  name:'Large',         seats:'51 to 75 seats',  min:90},
+  {id:'pkg_xl',     name:'Extra Large',   seats:'76 to 100 seats', min:120},
+  {id:'pkg_over',   name:'More than 100', seats:'needs a call',    care:true}
+];
+const STC_STEP = 30, STC_MAX = 240;
+const STC_EXTRAS = [
+  {id:'extra_table_qty', name:'Extra tables', unit:'tables', mins:10, block:5,  kind:'area', max:200,
+   desc:'Beyond what your package covers. Every started 5 tables adds 10 min.'},
+  {id:'extra_chair_qty', name:'Extra chairs', unit:'chairs', mins:10, block:20, kind:'area', max:500,
+   desc:'Beyond what your package covers. Every started 20 chairs adds 10 min.'}
+];
+const STC_ADDONS = [
+  {id:'glass_section_qty', name:'High glass / facade', unit:'section', mins:20, kind:'count', max:50, desc:'Per section.'},
+  {id:'sofa_qty', name:'Sofa cleaning', unit:'sofa', mins:5, kind:'count', max:100, desc:'Per sofa.'},
+  {id:'carpet_sqft', name:'Carpet cleaning', unit:'sqft', mins:15, block:100, kind:'area', max:10000, desc:'15 min per started 100 sqft.'},
+  {id:'outdoor_sqft', name:'Outdoor cleaning', unit:'sqft', mins:15, block:250, kind:'area', max:10000, desc:'15 min per started 250 sqft.'},
+  {id:'stain_zone_qty', name:'Special stain removal', unit:'zone', mins:10, kind:'count', max:50, desc:'Per spot or zone.'},
+  {id:'washbasin_qty', name:'Washbasin cleaning', unit:'washbasin', mins:10, kind:'count', max:50, desc:'Per washbasin.'}
+];
+
+/* ---------- 10. Store Cleaning (workbook v1, 23 Oct) ---------- */
+// One professional for every store size, so time on site is the whole job, never split.
+const SC_SIZES = [
+  {id:'SC01', name:'Up to 2,000 sqft',      base:45},
+  {id:'SC02', name:'2,001 to 4,000 sqft',   base:75},
+  {id:'SC03', name:'4,001 to 6,000 sqft',   base:90},
+  {id:'SC04', name:'6,001 to 8,000 sqft',   base:105},
+  {id:'SC05', name:'8,001 to 14,000 sqft',  base:150},
+  {id:'CUSTOM', name:'Above 14,000 sqft', sub:'needs a call', care:true}
+];
+const SC_ADDONS = [
+  {id:'deep_rack_bays', name:'Shelf & rack deep cleaning', unit:'rack', mins:10, kind:'count',
+   desc:'Deeper cleaning of shelves and racks, per rack or bay.'},
+  {id:'wall_area_sqft', name:'Wall cleaning', unit:'sqft', mins:5, block:100, kind:'area',
+   desc:'Accessible wall areas. 5 min per started 100 sqft.'},
+  {id:'ceiling_area_sqft', name:'Ceiling dusting', unit:'sqft', mins:5, block:100, kind:'area',
+   desc:'Reachable ceiling only, up to 8 ft. 5 min per started 100 sqft.'},
+  {id:'fixture_count', name:'Fixture cleaning', unit:'fixture', mins:5, block:3, kind:'count',
+   desc:'5 min for every started group of 3 fixtures.'},
+  {id:'exterior_rack_bays', name:'Shelf & rack exterior dusting', unit:'rack', mins:5, block:3, kind:'count',
+   desc:'5 min for every started group of 3 racks or bays.'}
+];
+
 /* ---------- add-on list renderer, shared by Opening/Closing and Dishwashing ---------- */
 function addonMins(a, v){
   if (!v) return 0;
-  return a.kind === 'area' ? Math.ceil(v / a.block) * a.mins : v * a.mins;
+  // Anything with a block size is charged per started block (sqft, tables, groups of 3 fixtures).
+  return a.block ? Math.ceil(v / a.block) * a.mins : v * a.mins;
 }
 function addonRows(list, qty){
   return `<div class="rows">` + list.map(a => {
@@ -735,8 +802,8 @@ function addonRows(list, qty){
           ${a.choices.map(c => `<button class="chip" data-v="${c}" aria-pressed="${v===c}">${c.toLocaleString()} ${a.unit}</button>`).join('')}
         </div></div>`;
     return a.kind === 'area'
-      ? UI.numRow('qty.'+a.id, a.name, sub, v, a.unit, v>0)
-      : UI.stepRow('qty.'+a.id, a.name, sub, v, 0, 99, v>0);
+      ? UI.numRow('qty.'+a.id, a.name, sub, v, a.unit, v>0, a.max)
+      : UI.stepRow('qty.'+a.id, a.name, sub, v, 0, a.max || 99, v>0);
   }).join('') + `</div>`;
 }
 function addonLines(list, qty){
@@ -843,6 +910,106 @@ const SERVICES = [
   rows:(st,r) => [['Service', st.service === 'opening' ? 'Opening clean' : 'Closing clean'],
                   ['Dining area', r.p.name + ' · ' + r.p.seats]]
     .concat(r.lines.map(l => [l.a.name, addonText(l.a, l.qty)]))
+},
+
+/* ===== SERVICE-TIME CLEANING ===== */
+{
+  id:'service_time_cleaning', name:'Service-Time Cleaning', cat:'Cleaning', icon:I.spray,
+  tagline:'Live cleaning of your dining area while you serve',
+  sub:'Live cleaning support for restaurant dining halls, dining area and front-of-house only.',
+  skipDetails:true, contentOnReview:true,
+  content:{
+    included:['Routine floor sweeping and cleaning','Tables and chairs cleaning','Dusting','Live spill cleaning','General surface wiping'],
+    notIncluded:['Dishwashing, booked as KST / Dishwashing'],
+    ready:null,
+    how:['Choose your dining area size and how long you need live cleaning','Add extra tables, chairs or add-ons',
+         'We work out the team, the time on site and the price']
+  },
+  init:() => ({pkg:'pkg_medium', duration:60,
+    qty:Object.fromEntries(STC_EXTRAS.concat(STC_ADDONS).map(a => [a.id, 0])),
+    dishwashing:false, note:''}),
+  steps:[
+    {title:'Your dining area', build:st => {
+      const p = STC_PACKAGES.find(x => x.id === st.pkg);
+      let h = UI.q('How big is the dining area?','Go by how many people you seat. This sets the shortest booking.',
+        UI.cards('pkg', STC_PACKAGES, st.pkg, {sub:'seats'}));
+      if (!p.care){
+        const d = st.duration;
+        h += UI.q('How long do you need live cleaning?',
+          `${p.name} starts at ${hhmm(p.min)}. Add time in ${STC_STEP}-minute steps, up to ${hhmm(STC_MAX)}.`,
+          `<div class="rows"><div class="row on">
+             <span class="rname">Live cleaning<span class="rsub">${d >= STC_MAX ? 'maximum reached' : d <= p.min ? 'package minimum' : 'from ' + hhmm(p.min) + ' minimum'}</span></span>
+             <!-- The shared stepper clamps to min and max, so the last step lands exactly on 45 min or 4 h. -->
+             <span class="stepper" data-input="step" data-key="duration" data-min="${p.min}" data-max="${STC_MAX}">
+               <button data-d="-${STC_STEP}" ${d <= p.min ? 'disabled' : ''} aria-label="Less time">–</button>
+               <span class="val" style="min-width:74px">${hhmm(d)}</span>
+               <button data-d="${STC_STEP}" ${d >= STC_MAX ? 'disabled' : ''} aria-label="More time">+</button>
+             </span></div></div>`);
+      }
+      return h;
+    }},
+    {title:'Extras', build:st => ''
+      + UI.q('More tables or chairs than usual?','Leave at 0 if your dining area matches the package.', addonRows(STC_EXTRAS, st.qty))
+      + UI.q('Anything beyond live cleaning?','All optional, each added on top of your live-cleaning time.', addonRows(STC_ADDONS, st.qty))
+      + UI.q('Need dishwashing too?','Dishwashing is its own service.',
+          UI.toggle('dishwashing','Yes, I need dishwashing','We note it here. Book KST / Dishwashing separately for the time and team.', st.dishwashing)
+          + (st.dishwashing ? `<div class="gotocard"><span class="rname">KST / Dishwashing<span class="rsub">Booked separately</span></span>
+               <button class="gotobtn" data-goto="kst_dishwashing">Book it</button></div>` : ''))
+      + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, 'Lunch rush is 12:30 to 2:30, focus on the window section'))}
+  ],
+  calc:st => {
+    const p = STC_PACKAGES.find(x => x.id === st.pkg);
+    if (p.care) return {care:true, reason:'More than 100 seats', p};
+    // The live duration never goes below the package minimum or above 240, whatever the package was before.
+    st.duration = Math.max(p.min, Math.min(STC_MAX, st.duration));
+    const lines = addonLines(STC_EXTRAS.concat(STC_ADDONS), st.qty);
+    const workload = st.duration + lines.reduce((s,l) => s + l.mins, 0);
+    return Object.assign({p, lines, live:st.duration}, staffing(workload));
+  },
+  rows:(st,r) => [['Dining area', r.p.name + ' · ' + r.p.seats.toLowerCase()], ['Live cleaning', hhmm(r.live)]]
+    .concat(r.lines.map(l => [l.a.name, addonText(l.a, l.qty)]))
+    .concat(st.dishwashing ? [['Dishwashing','Wanted, book separately']] : [])
+},
+
+/* ===== STORE CLEANING ===== */
+{
+  id:'store_cleaning', name:'Store Cleaning', cat:'Cleaning', icon:I.clip,
+  tagline:'Routine cleaning for retail stores, showrooms and shops',
+  sub:'Routine cleaning for retail stores, showrooms and shops.',
+  skipDetails:true,
+  content:{
+    included:['Floor cleaning: sweep or vacuum and mop accessible floors','Entrance cleaning: accessible entrance surfaces and glass doors',
+      'Billing counter cleaning: checkout and billing counter surfaces','Display cleaning: accessible display surfaces, without moving products',
+      'Trial room cleaning: floors, mirrors and accessible surfaces','Mirror and glass cleaning: accessible mirrors and glass partitions',
+      'Door and handle cleaning: doors, handles and touchpoints'],
+    includedNote:'Every store size gets the same seven tasks. A bigger store just takes longer.',
+    notIncluded:['Moving or removing stock','Areas above 8 ft','Special stain treatment','Heavy or specialist cleaning',
+      'Equipment repair','Bulk waste disposal'],
+    ready:null,
+    how:['Choose your store size','Add any extra cleaning you need','We work out the time on site and the price']
+  },
+  init:() => ({size:'SC01', qty:Object.fromEntries(SC_ADDONS.map(a => [a.id, 0])), note:''}),
+  steps:[
+    {title:'Your store', content:true, build:st =>
+      UI.q('How big is your store?','Go by the floor area. One professional does the whole job.',
+        UI.cards('size', SC_SIZES, st.size, {sub:'sub'}))},
+    {title:'Add-ons', build:st => ''
+      + UI.q('Anything beyond the routine clean?','All optional. Leave them at zero for the routine clean only.', addonRows(SC_ADDONS, st.qty))
+      + UI.q('Need dustbins cleaned?','',
+          `<div class="gotocard"><span class="rname">Dustbin cleaning<span class="rsub">Available through Garbage & Waste Handling. Book it separately.</span></span>
+           <button class="gotobtn" data-goto="garbage_waste">Book it</button></div>`)
+      + UI.q('Any special instruction?','Optional. Goes straight to the team.', UI.note('note', st.note, 'Store opens at 10, please finish the trial rooms first'))}
+  ],
+  calc:st => {
+    const s = SC_SIZES.find(x => x.id === st.size);
+    if (s.care) return {care:true, reason:'A store above 14,000 sqft', s};
+    const lines = addonLines(SC_ADDONS, st.qty);
+    const workload = s.base + lines.reduce((a,l) => a + l.mins, 0);
+    if (workload > LIMIT) return {care:true, reason:'More than 8 hours of work', s};
+    // Always one professional, so the whole job is the time on site.
+    return {care:false, s, lines, workload, pros:1, each:workload, onsite:roundUp(workload)};
+  },
+  rows:(st,r) => [['Store size', r.s.name]].concat(r.lines.map(l => [l.a.name, addonText(l.a, l.qty)]))
 },
 
 /* ===== KITCHEN EQUIPMENT CLEANING ===== */
@@ -1317,6 +1484,15 @@ let slot = {day:0, time:null};
 let bookings = [];
 
 try { bookings = JSON.parse(localStorage.getItem('instaff.bookings') || '[]'); } catch(e){ bookings = []; }
+
+// Customer details for the smoke test. Remembered on this phone only, so a repeat booking is quicker.
+let lead = {name:'', business:'', phone:'', area:'', website:''};   // website is a hidden spam trap
+let leadMode = 'booking';                                             // 'booking' or 'care' (call back)
+let leadError = '';
+try { Object.assign(lead, JSON.parse(localStorage.getItem('instaff.lead') || '{}'), {website:''}); } catch(e){}
+function saveLead(){
+  try { localStorage.setItem('instaff.lead', JSON.stringify({name:lead.name, business:lead.business, phone:lead.phone, area:lead.area})); } catch(e){}
+}
 function saveBookings(){ try { localStorage.setItem('instaff.bookings', JSON.stringify(bookings)); } catch(e){} }
 
 const TIMES = ['07:00','08:00','09:00','10:00','11:00','12:00','14:00','16:00','18:00','20:00','21:00','22:00'];
@@ -1347,6 +1523,7 @@ function render(){
   if (view === 'form')      return renderForm(r);
   if (view === 'review')    return renderReview(r);
   if (view === 'slot')      return renderSlot(r);
+  if (view === 'details')   return renderDetails(r);
   if (view === 'done')      return renderDone();
 }
 
@@ -1523,19 +1700,112 @@ function renderSlot(r){
         ? `Everyone starts together and works ${hhmm(r.per*60)}.`
         : `${plural(r.pros,'professional')} on site for ${hhmm(r.onsite)}.`,
       `<div class="slots" data-input="time">` + TIMES.map(t =>
-        `<button class="slot" data-v="${t}" aria-pressed="${slot.time===t}">${t}</button>`).join('') + `</div>`)
-    + `<div class="note">This is a prototype, so availability is not checked against a real roster.</div>`;
+        `<button class="slot" data-v="${t}" aria-pressed="${slot.time===t}">${t}</button>`).join('') + `</div>`);
   bindInputs();
-  footerBar(estimateLine(r) + `<button class="btn" id="confirm" ${slot.time?'':'disabled'}>Confirm booking</button>`);
-  document.getElementById('confirm').onclick = () => {
-    const d = ds[slot.day];
+  footerBar(estimateLine(r) + `<button class="btn" id="next" ${slot.time?'':'disabled'}>Continue</button>`);
+  document.getElementById('next').onclick = () => { leadMode = 'booking'; leadError = ''; view = 'details'; render(); };
+}
+
+/* ---------- customer details (smoke test lead capture) ---------- */
+function normPhone(p){
+  let d = String(p || '').replace(/\D/g, '');
+  if (d.length === 12 && d.indexOf('91') === 0) d = d.slice(2);
+  if (d.length === 11 && d.charAt(0) === '0') d = d.slice(1);
+  return /^[6-9]\d{9}$/.test(d) ? d : null;
+}
+function leadValid(){
+  return lead.name.trim().length > 1 && lead.business.trim().length > 1 && !!normPhone(lead.phone);
+}
+function isoDate(d){
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function teamText(r){
+  if (r.care) return '';
+  return r.blocks ? `${plural(r.people,'person')} · ${hhmm(r.per*60)} each`
+                  : `${plural(r.pros,'professional')} · ${hhmm(r.onsite)} on site`;
+}
+function careReasonOf(r){ return r.reason || svc.careReason || 'This one needs a call'; }
+function reviewLines(r){
+  try { return svc.rows(st, r).map(([k,v]) => k + ': ' + v); } catch(e){ return []; }
+}
+function buildLead(r, ref){
+  const care = leadMode === 'care';
+  const d = days()[slot.day].d;
+  // A call back can come from tapping "More than 4", so the on-screen answers may not be what
+  // the customer wants. Send only the reason; the team gets the details on the call.
+  const lines = care ? [] : reviewLines(r);
+  return {
+    source:'instaff-prototype', website:lead.website, ref,
+    type: care ? 'Call back' : 'Booking',
+    service: svc.name,
+    date: care ? '' : isoDate(d),
+    time: care ? '' : slot.time,
+    team: care ? '' : teamText(r),
+    onsite: care ? '' : (r.blocks ? hhmm(r.per*60) + ' each' : hhmm(r.onsite)),
+    details: (care ? ['Reason: ' + careReasonOf(r)] : []).concat(lines).join(' | '),
+    note: st.note || '',
+    name: lead.name.trim(), business: lead.business.trim(),
+    phone: '+91' + normPhone(lead.phone), area: lead.area.trim()
+  };
+}
+// Apps Script web apps do not answer browser preflight checks, so the row goes as plain text
+// with no-cors. The browser cannot read the reply; a network failure still throws, and is shown.
+async function sendLead(payload){
+  if (!SHEET_URL) return 'not-configured';
+  try {
+    await fetch(SHEET_URL, {method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload)});
+    return 'sent';
+  } catch(e){ return 'failed'; }
+}
+
+function renderDetails(r){
+  const care = leadMode === 'care';
+  bar(svc.name, care ? 'Request a call back' : 'Your details');
+  const ds = days(), d = ds[slot.day];
+  const field = (key, label, ph, type, req, help) => `<div class="q">
+      <div class="qlabel">${label}${req ? '' : '<span class="opt">optional</span>'}</div>
+      ${help ? `<div class="qhelp">${help}</div>` : ''}
+      <input class="tinput big" data-lead="${key}" type="${type}" placeholder="${ph}" value="${esc(lead[key]||'')}"
+        ${type === 'tel' ? 'inputmode="tel" autocomplete="tel"' : key === 'name' ? 'autocomplete="name"' : key === 'business' ? 'autocomplete="organization"' : ''}>
+    </div>`;
+  $screen.innerHTML =
+    (care
+      ? `<div class="warnnote"><strong>${esc(careReasonOf(r))}.</strong> Leave your details and our team will call you to plan the people, the time and the price.</div>`
+      : big(`${slot.day===0?'Today':d.name} ${d.num} ${d.mon} · ${slot.time}`, teamText(r)))
+    + field('name', 'Your name', 'Full name', 'text', true)
+    + field('business', 'Business name', 'Restaurant, shop or company', 'text', true)
+    + field('phone', 'Phone number', '10-digit mobile number', 'tel', true, "We'll use this number to confirm your booking.")
+    + field('area', 'Area', 'For example Thoraipakkam, OMR', 'text', false)
+    + `<input class="hp" data-lead="website" tabindex="-1" autocomplete="off" aria-hidden="true">`
+    + (!SHEET_URL ? `<div class="warnnote"><strong>Not connected yet.</strong> SHEET_URL is empty at the top of the file, so these details will not reach the Google Sheet.</div>` : '')
+    + (leadError ? `<div class="warnnote">${leadError}</div>` : '');
+  const btnText = care ? 'Request a call back' : 'Confirm booking';
+  footerBar((care ? `<div class="estimate care">${I.clock}<span>Needs a call</span></div>` : estimateLine(r))
+    + `<button class="btn" id="submit" ${leadValid() ? '' : 'disabled'}>${btnText}</button>`);
+  const btn = document.getElementById('submit');
+  $screen.querySelectorAll('[data-lead]').forEach(inp => {
+    inp.oninput = () => { lead[inp.dataset.lead] = inp.value; btn.disabled = !leadValid(); };
+  });
+  btn.onclick = async () => {
+    if (!leadValid() || btn.dataset.busy) return;
+    btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = 'Sending…';
+    const ref = 'IN' + Math.floor(100000 + Math.random()*899999);
+    const payload = buildLead(r, ref);
+    const res = await sendLead(payload);
+    if (res === 'failed'){
+      leadError = "<strong>That didn't go through.</strong> Check your internet connection and try again.";
+      return render();
+    }
+    leadError = ''; saveLead();
     bookings.unshift({
-      ref:'IN' + Math.floor(100000 + Math.random()*899999),
-      name:svc.name, status:'ok',
-      when:`${d.name} ${d.num} ${d.mon} · ${slot.time}`,
-      team: r.blocks
-        ? `${plural(r.people,'person').replace('persons','people')} · ${hhmm(r.per*60)} each`
-        : `${plural(r.pros,'professional')} · ${hhmm(r.onsite)} on site`
+      ref, name:svc.name, status: care ? 'care' : 'ok', sheet:res, phone:payload.phone,
+      when: care ? 'Call back requested' : `${d.name} ${d.num} ${d.mon} · ${slot.time}`,
+      team: care ? careReasonOf(r) : teamText(r),
+      wa: [`Instaff ${payload.type.toLowerCase()} ${ref}`, svc.name,
+           care ? payload.details : `${payload.date} at ${payload.time} · ${payload.team}`,
+           care ? '' : payload.details,
+           `${payload.name}, ${payload.business}${payload.area ? ', ' + payload.area : ''}`].filter(Boolean).join('\n')
     });
     saveBookings(); view = 'done'; render();
   };
@@ -1544,34 +1814,38 @@ function renderSlot(r){
 /* ---------- confirmation ---------- */
 function renderDone(){
   const b = bookings[0];
-  $top.innerHTML = `<div class="tbrow"><div class="tbtitle">Booked</div></div>`;
+  const care = b.status === 'care';
+  $top.innerHTML = `<div class="tbrow"><div class="tbtitle">${care ? 'Call back requested' : 'Booked'}</div></div>`;
   $screen.innerHTML = `<div class="done">
-      <div class="donecircle">${I.bigtick}</div>
-      <div class="donetitle">You're booked</div>
-      <div class="caretext">${b.name}<br>${b.when}<br>${b.team}</div>
+      <div class="donecircle">${care ? I.phone : I.bigtick}</div>
+      <div class="donetitle">${care ? "We'll call you back" : "You're booked"}</div>
+      <div class="caretext">${b.name}<br>${care ? esc(b.team) : b.when + '<br>' + b.team}</div>
       <div class="ref">${b.ref}</div>
-      <div class="caretext">We'll confirm the price before the team starts. Nothing is charged in this prototype.</div>
+      <div class="caretext">We'll call you on ${b.phone} to confirm the team and the price before anyone is sent. Nothing is charged here.</div>
+      ${b.sheet === 'not-configured' ? `<div class="warnnote" style="text-align:left">Not sent to the Google Sheet: SHEET_URL is empty.</div>` : ''}
     </div>`;
-  footerBar(`<button class="btn" id="home">Back to services</button>
-             <button class="btn ghost" id="mine">See my bookings</button>`);
+  footerBar((WHATSAPP_NUMBER
+      ? `<a class="btn alt" href="https://wa.me/${WHATSAPP_NUMBER.replace(/\D/g,'')}?text=${encodeURIComponent(b.wa)}" target="_blank" rel="noopener">Send these details on WhatsApp</a>` : '')
+    + `<button class="btn" id="home">Back to services</button>
+       <button class="btn ghost" id="mine">See my bookings</button>`);
   document.getElementById('home').onclick = () => { view = 'home'; svc = null; slot = {day:0,time:null}; render(); };
   document.getElementById('mine').onclick = () => { view = 'bookings'; svc = null; slot = {day:0,time:null}; render(); };
 }
 
-/* ---------- customer care ---------- */
+/* ---------- customer care: now a call-back request, captured as a lead ---------- */
 function renderCare(r){
   bar(svc.name);
-  const reason = r.reason || svc.careReason || 'This one needs a call';
+  const reason = careReasonOf(r);
   $screen.innerHTML = `<div class="care-screen">
       <div class="carecircle">${I.phone}</div>
       <div class="caretitle">Let's talk it through</div>
       <div class="caretext">${reason}. Our team will plan the people and the time with you, and confirm a price before anything starts.</div>
-      <div class="carenum">LATER · customer care number</div>
-      <div class="caretext">Open LATER</div>
+      <div class="caretext">Leave your number and we'll call you back.</div>
     </div>`;
   footerBar(`<div class="estimate care">${I.clock}<span>Needs a call</span></div>
-    <button class="btn">Call customer care</button>
+    <button class="btn" id="callback">Request a call back</button>
     <button class="btn ghost" id="chg">Change my answers</button>`);
+  document.getElementById('callback').onclick = () => { leadMode = 'care'; leadError = ''; view = 'details'; render(); };
   document.getElementById('chg').onclick = () => { view = 'form'; render(); };
 }
 
@@ -1592,6 +1866,13 @@ function bindInputs(){
   $screen.querySelectorAll('[data-input="seg"] button, [data-input="card"] button').forEach(b => {
     b.onclick = () => { setKey(b.closest('[data-key]').dataset.key, b.dataset.v); render(); };
   });
+  // "Book it separately" links that open another service
+  $screen.querySelectorAll('[data-goto]').forEach(b => {
+    b.onclick = () => {
+      const t = byId(b.dataset.goto); if (!t) return;
+      svc = t; st = t.init(); stepIx = 0; view = t.skipDetails ? 'form' : 'service'; render();
+    };
+  });
   $screen.querySelectorAll('[data-input="pick"] button').forEach(b => {
     b.onclick = () => { setKey(b.closest('[data-key]').dataset.key, Number(b.dataset.v)); render(); };
   });
@@ -1609,7 +1890,11 @@ function bindInputs(){
     });
   });
   $screen.querySelectorAll('[data-input="num"]').forEach(inp => {
-    inp.oninput = () => { setKey(inp.dataset.key, Math.max(0, Number(inp.value) || 0)); refreshFooter(); };
+    inp.oninput = () => {
+      let v = Math.max(0, Math.floor(Number(inp.value) || 0));
+      if (inp.dataset.max) v = Math.min(v, Number(inp.dataset.max));
+      setKey(inp.dataset.key, v); refreshFooter();
+    };
     inp.onblur = () => render();
   });
   $screen.querySelectorAll('[data-input="toggle"]').forEach(b => {
@@ -1647,6 +1932,7 @@ function goBack(){
   }
   if (view === 'review'){ view = 'form'; stepIx = svc.steps.length - 1; return render(); }
   if (view === 'slot'){ view = 'review'; return render(); }
+  if (view === 'details'){ leadError = ''; view = leadMode === 'care' ? 'care' : 'slot'; return render(); }
   view = 'home'; svc = null; render();
 }
 
